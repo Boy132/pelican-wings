@@ -90,10 +90,32 @@ func init() {
 	rootCommand.AddCommand(newDiagnosticsCommand())
 }
 
+func isDockerSnap() bool {
+    cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+    if err != nil {
+        log.Fatalf("Unable to initialize Docker client: %s", err)
+    }
+
+    defer cli.Close() // Close the client when the function returns (should not be needed, but just to be safe)
+
+    info, err := cli.Info(context.Background())
+    if err != nil {
+        log.Fatalf("Unable to get Docker info: %s", err)
+    }
+
+    // Check if Docker root directory contains '/var/snap/docker'
+    return strings.Contains(info.DockerRootDir, "/var/snap/docker")
+}
+
 func rootCmdRun(cmd *cobra.Command, _ []string) {
 	printLogo()
 	log.Debug("running in debug mode")
 	log.WithField("config_file", configPath).Info("loading configuration from file")
+
+	if isDockerSnap() {
+		log.Error("Docker Snap installation detected. Exiting...")
+		os.Exit(1)
+	}
 
 	if ok, _ := cmd.Flags().GetBool("ignore-certificate-errors"); ok {
 		log.Warn("running with --ignore-certificate-errors: TLS certificate host chains and name will not be verified")
@@ -432,7 +454,7 @@ Copyright © 2018 - %d Dane Everitt & Contributors
 
 Website:  https://pelican.dev
  Source:  https://github.com/pelican-dev/wings
-License:  https://github.com/pelican-dev/wings/blob/develop/LICENSE
+License:  https://github.com/pelican-dev/wings/blob/main/LICENSE
 
 This software is made available under the terms of the MIT license.
 The above copyright notice and this permission notice shall be included

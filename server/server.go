@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"emperror.dev/errors"
 	"github.com/apex/log"
@@ -145,19 +147,59 @@ func (s *Server) Context() context.Context {
 	return s.ctx
 }
 
+// DetermineServerTimezone checks the envvars for a non-empty SERVER_TIMEZONE key,
+// validates if it's a valid timezone, and returns it. If not, returns the defaultTimezone.
+func DetermineServerTimezone(envvars map[string]interface{}, defaultTimezone string) string {
+	// Check if SERVER_TIMEZONE exists in envvars and is non-empty
+	timezone, ok := envvars["SERVER_TIMEZONE"].(string)
+	if ok && timezone != "" {
+		// Validate the timezone
+		_, err := time.LoadLocation(timezone)
+		if err == nil {
+			// Valid timezone, return it
+			return timezone
+		}
+		// Invalid timezone, fall through to return defaultTimezone
+	}
+
+	// Return the defaultTimezone if SERVER_TIMEZONE is not set, empty, or invalid
+	return defaultTimezone
+}
+
 // parseInvocation parses the start command in the same way we already do in the entrypoint
 // We can use this to set the container command with all variables replaced.
 func parseInvocation(invocation string, envvars map[string]interface{}, memory int64, port int, ip string) (parsed string) {
-	// replace "{{" and "}}" with "${" and "}" respectively
+	// Replace "{{" and "}}" with "${" and "}" respectively
 	invocation = strings.ReplaceAll(invocation, "{{", "${")
 	invocation = strings.ReplaceAll(invocation, "}}", "}")
 
-	// replaces ${varname} with varval
+	// Regex to find protected segments
+	reProtected := regexp.MustCompile(`\[\[.*?\]\]`)
+
+	// Get all protected segments
+	protectedSegments := reProtected.FindAllString(invocation, -1)
+
+	// Replace ${varname} with varval if not in protected segments
 	for varname, varval := range envvars {
-		invocation = strings.ReplaceAll(invocation, fmt.Sprintf("${%s}", varname), fmt.Sprint(varval))
+		placeholder := fmt.Sprintf("${%s}", varname)
+
+		// Temporarily replace protected segments with placeholders to prevent replacements within them
+		tempSegments := make([]string, len(protectedSegments))
+		for i, segment := range protectedSegments {
+			tempSegments[i] = fmt.Sprintf("__PROTECTED_SEGMENT_%d__", i)
+			invocation = strings.Replace(invocation, segment, tempSegments[i], 1)
+		}
+
+		// Replace the placeholders outside of protected segments
+		invocation = strings.ReplaceAll(invocation, placeholder, fmt.Sprint(varval))
+
+		// Restore protected segments
+		for i, segment := range tempSegments {
+			invocation = strings.Replace(invocation, segment, protectedSegments[i], 1)
+		}
 	}
 
-	// replace the defaults with their configured values.
+	// Replace the defaults with their configured values.
 	invocation = strings.ReplaceAll(invocation, "${SERVER_PORT}", strconv.Itoa(port))
 	invocation = strings.ReplaceAll(invocation, "${SERVER_MEMORY}", strconv.Itoa(int(memory)))
 	invocation = strings.ReplaceAll(invocation, "${SERVER_IP}", ip)
@@ -169,8 +211,7 @@ func parseInvocation(invocation string, envvars map[string]interface{}, memory i
 // server instance.
 func (s *Server) GetEnvironmentVariables() []string {
 	out := []string{
-		// TODO: allow this to be overridden by the user.
-		fmt.Sprintf("TZ=%s", config.Get().System.Timezone),
+		fmt.Sprintf("TZ=%s", DetermineServerTimezone(s.Config().EnvVars, config.Get().System.Timezone)),
 		fmt.Sprintf("STARTUP=%s", parseInvocation(s.Config().Invocation, s.Config().EnvVars, s.MemoryLimit(), s.Config().Allocations.DefaultMapping.Port, s.Config().Allocations.DefaultMapping.Ip)),
 		fmt.Sprintf("SERVER_MEMORY=%d", s.MemoryLimit()),
 		fmt.Sprintf("SERVER_IP=%s", s.Config().Allocations.DefaultMapping.Ip),
