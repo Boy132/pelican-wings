@@ -31,9 +31,24 @@ import (
 func getServerFileContents(c *gin.Context) {
 	s := middleware.ExtractServer(c)
 	p := strings.TrimLeft(c.Query("file"), "/")
+	if err := s.Filesystem().IsIgnored(p); err != nil {
+		middleware.CaptureAndAbort(c, err)
+		return
+	}
 	f, st, err := s.Filesystem().File(p)
 	if err != nil {
-		middleware.CaptureAndAbort(c, err)
+		if errors.Is(err, os.ErrNotExist) {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
+				"error":      "The requested resources was not found on the system.",
+				"request_id": c.Writer.Header().Get("X-Request-Id")})
+		} else if strings.Contains(err.Error(), "filesystem: is a directory") {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error":      "Cannot perform that action: file is a directory.",
+				"request_id": c.Writer.Header().Get("X-Request-Id"),
+			})
+		} else {
+			middleware.CaptureAndAbort(c, err)
+		}
 		return
 	}
 	defer f.Close()
@@ -76,9 +91,16 @@ func getServerFileContents(c *gin.Context) {
 
 // Returns the contents of a directory for a server.
 func getServerListDirectory(c *gin.Context) {
-	s := ExtractServer(c)
+	s := middleware.ExtractServer(c)
 	dir := c.Query("directory")
 	if stats, err := s.Filesystem().ListDirectory(dir); err != nil {
+		// If the error is that the folder does not exist return a 404.
+		if errors.Is(err, os.ErrNotExist) {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
+				"error": "The requested directory was not found on the server.",
+			})
+			return
+		}
 		middleware.CaptureAndAbort(c, err)
 	} else {
 		c.JSON(http.StatusOK, stats)
@@ -214,6 +236,9 @@ func postServerDeleteFiles(c *gin.Context) {
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
+				if err := s.Filesystem().IsIgnored(pi); err != nil {
+					return err
+				}
 				return s.Filesystem().Delete(pi)
 			}
 		})
@@ -324,7 +349,10 @@ func postServerPullRemoteFile(c *gin.Context) {
 		FileName:  data.FileName,
 		UseHeader: data.UseHeader,
 	})
-
+	if err := s.Filesystem().IsIgnored(dl.Path()); err != nil {
+		middleware.CaptureAndAbort(c, err)
+		return
+	}
 	download := func() error {
 		s.Log().WithField("download_id", dl.Identifier).WithField("url", u.String()).Info("starting pull of remote file to disk")
 		if err := dl.Execute(); err != nil {
@@ -401,6 +429,7 @@ func postServerCompressFiles(c *gin.Context) {
 	var data struct {
 		RootPath string   `json:"root"`
 		Files    []string `json:"files"`
+		Name     string   `json:"name"`
 	}
 
 	if err := c.BindJSON(&data); err != nil {
@@ -421,7 +450,7 @@ func postServerCompressFiles(c *gin.Context) {
 		return
 	}
 
-	f, err := s.Filesystem().CompressFiles(data.RootPath, data.Files)
+	f, err := s.Filesystem().CompressFiles(data.RootPath, data.Name, data.Files)
 	if err != nil {
 		middleware.CaptureAndAbort(c, err)
 		return
